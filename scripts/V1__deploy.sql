@@ -1,11 +1,14 @@
-
--- Force SQL*Plus to exit immediately with a failure code back to Jenkins if a login/SQL error occurs
 WHENEVER SQLERROR EXIT SQL.SQLCODE;
 WHENEVER OSERROR EXIT FAILURE;
 
--- Execute your downstream migration scripts
+-- 1. Start capturing all output to a file named deployment.log
+SPOOL deployment.log;
+
+-- 2. Run your nested scripts
 @scripts/V1__check.sql
 @scripts/V1__create_table.sql
 
--- Cleanly disconnect upon completion
+-- 3. Turn off spooling
+SPOOL OFF;
+
 EXIT;
