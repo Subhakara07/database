@@ -1,1 +1,1 @@
-select current_database();
+select name from v$database;
