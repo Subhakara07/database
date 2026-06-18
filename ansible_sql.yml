@@ -1,0 +1,119 @@
+---
+- name: Deploy and Execute Oracle SQL Scripts (Full Pipeline)
+  hosts: dbservers
+  gather_facts: no
+
+  vars:
+    oracle_home: /opt/oracle/product/26ai/dbhomeFree
+    oracle_sid: FREE
+    local_sql_dir: /ansible/scripts/sql_files
+    remote_base_dir: /home/oracle/scripts
+    execution_mode: continue   # change to "stop" if you want fail-fast
+
+  tasks:
+    # ----------------------------------------------------
+    # 1. Generate timestamp (single run context)
+    # ----------------------------------------------------
+    - name: Generate timestamp
+      ansible.builtin.set_fact:
+        run_ts: "{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}"
+
+    - name: Set remote directory paths
+      ansible.builtin.set_fact:
+        remote_target_dir: "{{ remote_base_dir }}/Script_{{ run_ts }}"
+        remote_log_dir: "{{ remote_base_dir }}/Script_{{ run_ts }}/logs"
+
+    # ----------------------------------------------------
+    # 2. Create directories on target
+    # ----------------------------------------------------
+    - name: Create script and log directories
+      ansible.builtin.raw: |
+        mkdir -p {{ remote_target_dir }}
+        mkdir -p {{ remote_log_dir }}
+        chmod -R 755 {{ remote_target_dir }}
+
+    # ----------------------------------------------------
+    # 3. Copy SQL scripts
+    # ----------------------------------------------------
+    - name: Copy SQL scripts to target
+      delegate_to: localhost
+      ansible.builtin.shell: |
+        scp -i /var/jenkins_home/.ssh/id_rsa \
+          -o StrictHostKeyChecking=no \
+          {{ local_sql_dir }}/*.sql \
+          oracle@{{ inventory_hostname }}:{{ remote_target_dir }}/
+
+    # ----------------------------------------------------
+    # 4. Validate Oracle environment
+    # ----------------------------------------------------
+    - name: Validate Oracle environment
+      ansible.builtin.raw: >
+        export ORACLE_HOME="{{ oracle_home }}" &&
+        export ORACLE_SID="{{ oracle_sid }}" &&
+        export PATH=$ORACLE_HOME/bin:$PATH &&
+        echo "=== Validation ===" &&
+        if [ ! -d "$ORACLE_HOME" ]; then
+          echo "ERROR: ORACLE_HOME missing";
+          exit 1;
+        fi &&
+        if [ ! -x "$ORACLE_HOME/bin/sqlplus" ]; then
+          echo "ERROR: sqlplus missing";
+          exit 1;
+        fi &&
+        if [ ! -d "{{ remote_target_dir }}" ]; then
+          echo "ERROR: script directory missing";
+          exit 1;
+        fi &&
+        echo "SUCCESS: Environment validated"
+
+    # ----------------------------------------------------
+    # 5. Execute ALL SQL scripts sequentially
+    # ----------------------------------------------------
+    - name: Execute all SQL scripts
+      ansible.builtin.raw: >
+        export ORACLE_HOME="{{ oracle_home }}" &&
+        export ORACLE_SID="{{ oracle_sid }}" &&
+        export PATH=$ORACLE_HOME/bin:$PATH &&
+        echo "=== Starting SQL Execution ===" &&
+        for sql in {{ remote_target_dir }}/*.sql; do
+          [ -e "$sql" ] || continue;
+          echo "------------------------------------";
+          echo "Executing: $sql";
+          logfile="{{ remote_log_dir }}/$(basename $sql).log";
+          $ORACLE_HOME/bin/sqlplus -s / as sysdba <<SQL_INLINE > $logfile 2>&1
+          set heading on
+          set feedback on
+          set pagesize 100
+          set linesize 200
+          @${sql}
+          exit;
+        SQL_INLINE
+          rc=$?;
+          if [ $rc -ne 0 ]; then
+            echo "FAILED: $sql (rc=$rc)";
+            if [ "{{ execution_mode }}" = "stop" ]; then exit 1; fi;
+          else
+            echo "SUCCESS: $sql";
+          fi;
+        done &&
+        echo "=== Execution Completed ==="
+      register: sql_exec
+
+    # ----------------------------------------------------
+    # 6. Show execution summary
+    # ----------------------------------------------------
+    - name: Show execution output
+      ansible.builtin.debug:
+        var: sql_exec.stdout_lines
+
+    # ----------------------------------------------------
+    # 7. List generated logs
+    # ----------------------------------------------------
+    - name: Show log files
+      ansible.builtin.raw: |
+        ls -l {{ remote_log_dir }}
+      register: logs
+
+    - name: Display logs
+      ansible.builtin.debug:
+        var: logs.stdout_lines
